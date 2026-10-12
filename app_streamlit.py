@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 import statsmodels.api as sm
 import statsmodels.formula.api as smf
+import gspread
 
 warnings.filterwarnings("ignore")
 
@@ -179,6 +180,47 @@ def relatividades(p, m_freq, m_sev):
     out = [(NOMBRE[pref], str(niv), rel(m_freq, pref, niv) * rel(m_sev, pref, niv))
            for pref, niv in nivs.items()]
     return sorted(out, key=lambda x: abs(np.log(x[2])), reverse=True)   # mayor impacto primero
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2b · Memoria: guardar cada cotización en Google Sheets (bonus)
+#      Credenciales vía st.secrets (local: .streamlit/secrets.toml, que NO se sube;
+#      servidor: App settings → Secrets). Si no hay secrets, la app sigue funcionando.
+# ─────────────────────────────────────────────────────────────────────────────
+def sheets_configurado():
+    try:
+        return "gcp_service_account" in st.secrets and "sheet_url" in st.secrets
+    except Exception:
+        return False
+
+
+@st.cache_resource
+def hoja():
+    gc = gspread.service_account_from_dict(dict(st.secrets["gcp_service_account"]))
+    return gc.open_by_url(st.secrets["sheet_url"]).sheet1
+
+
+def ahora_texto():
+    try:
+        return pd.Timestamp.now(tz="America/Mexico_City").strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def guardar_cotizacion(p, pp_glm, tarifa):
+    if not sheets_configurado():
+        st.info("La cotización no se guardó: falta configurar Google Sheets en los secrets.")
+        return
+    try:
+        hoja().append_row([ahora_texto(),
+                           int(p["edad_conductor"]), str(p["cobertura"]), str(p["sexo"]),
+                           str(p["uso"]), str(p["combustible"]), int(p["antiguedad"]),
+                           int(p["potencia"]), int(p["bonus"]),
+                           round(float(pp_glm), 2), round(float(tarifa), 2)],
+                          value_input_option="USER_ENTERED")
+        st.success("Cotización guardada en Google Sheets ✔")
+    except Exception as e:
+        st.error(f"No se pudo guardar la cotización en Google Sheets: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -342,6 +384,9 @@ with tab_cotiza:
 
     if st.button("Cotizar", type="primary"):
         st.session_state["perfil"] = perfil
+        # Calcula la prima GLM y la tarifa de este perfil y la guarda como fila nueva
+        _, _, pp_glm_nuevo, _ = cotizar_glm(perfil, m_freq, m_sev, m_agg)
+        guardar_cotizacion(perfil, pp_glm_nuevo, pp_glm_nuevo / (1 - gastos - margen))
 
     if "perfil" in st.session_state:
         p = st.session_state["perfil"]
@@ -393,3 +438,14 @@ with tab_cotiza:
         plt.close(fig3)
         st.caption(f"Prima base (perfil de referencia): ${pp_ref:,.2f} → tu prima pura: ${pp_glm:,.2f}. "
                    "Rojo = pagas más · verde = pagas menos.")
+
+    if sheets_configurado():
+        with st.expander("Últimas cotizaciones guardadas (Google Sheets)"):
+            try:
+                registros = pd.DataFrame(hoja().get_all_records())
+                if registros.empty:
+                    st.write("Todavía no hay cotizaciones guardadas.")
+                else:
+                    st.dataframe(registros.tail(10), hide_index=True)
+            except Exception as e:
+                st.error(f"No se pudo leer la Google Sheet: {e}")
